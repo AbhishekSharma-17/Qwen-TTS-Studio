@@ -41,7 +41,7 @@ bash scripts/00_install.sh              # venv, vLLM 0.19.1 aarch64, vllm-omni (
 bash scripts/10_download_weights.sh     # fetches any missing model weight sets (idempotent)
 ```
 
-### 2.2 Lifecycle
+### 2.2 Lifecycle (full stack: orchestrator + 3 backends)
 
 ```bash
 bash scripts/start.sh                   # spins up supervisord + 4 services (orchestrator + 3 vllm-omni backends)
@@ -50,6 +50,24 @@ bash scripts/restart.sh                 # stop + start
 bash scripts/status.sh                  # supervisord process table + orchestrator /health JSON
 bash scripts/logs.sh                    # tail all 5 logs (Ctrl-C to stop tailing; services keep running)
 ```
+
+### 2.2b Standalone single-model mode (for embedding / integrations)
+
+Launch ONE backend directly — no orchestrator, no UI, no supervisord. Ideal for embedding Qwen3-TTS in another app. Ctrl-C to stop cleanly.
+
+```bash
+bash scripts/run_customvoice.sh                       # preset speakers on :8091
+bash scripts/run_voicedesign.sh                       # voice design on :8092
+bash scripts/run_base.sh                              # voice clone on :8093
+
+# Or generic form (pick task / port / bind address):
+bash scripts/run_standalone.sh CustomVoice            # default :8091, 0.0.0.0
+bash scripts/run_standalone.sh VoiceDesign 8100       # on :8100
+bash scripts/run_standalone.sh Base 8200 127.0.0.1    # localhost-only bind
+bash scripts/run_standalone.sh --help                 # full usage
+```
+
+After `Uvicorn running on http://…` appears, call it like any OpenAI-compatible speech server — see §11 for full integration examples.
 
 ### 2.3 Verification & benchmarks
 
@@ -925,9 +943,280 @@ If all three of these are true, deleting the orchestrator is fine and you save a
 
 In that case, disable the other programs in `configs/supervisord.conf.tpl` (set `autostart=false`) and point your client at the one backend port you actually use. The orchestrator becomes pure overhead.
 
+But usually you don't even need to touch supervisord — the launcher scripts in the next section handle this for you.
+
 ---
 
-## 11. Use-case recipes
+## 11. Standalone single-model mode · integration guide
+
+Most of the time you want the full stack — the orchestrator at `:8080` gives you task routing, voice-library persistence, the UI, and the OpenAI-compatible schema. But when you're **embedding Qwen3-TTS in another application** (a server, an agent, a pipeline), you usually just need **one task type** running on a single port that you can call from code. This section is the end-to-end recipe for that mode.
+
+### 11.1 Launch a single backend (no orchestrator, no UI)
+
+Three convenience scripts, each wrapping the generic `scripts/run_standalone.sh`:
+
+```bash
+bash scripts/run_customvoice.sh                 # preset speakers  :8091
+bash scripts/run_voicedesign.sh                 # voice design     :8092
+bash scripts/run_base.sh                        # voice cloning    :8093
+
+# Or the generic form:
+bash scripts/run_standalone.sh CustomVoice           # default :8091 on 0.0.0.0
+bash scripts/run_standalone.sh VoiceDesign 8100      # pick another port
+bash scripts/run_standalone.sh Base 8200 127.0.0.1   # localhost-only bind
+bash scripts/run_standalone.sh --help                # full usage
+```
+
+What the script does:
+
+1. Verifies the venv + chosen model's weights exist.
+2. Checks the chosen port is free — if the full stack is already running on that port, it bails with a clear error.
+3. Activates the venv and exec's `vllm-omni serve` in the foreground with the correct model directory + `configs/qwen3_tts_dgx.yaml`.
+4. Prints a banner with the exact endpoint URL + a ready-to-paste curl example.
+5. Traps `SIGINT` / `SIGTERM` for a clean shutdown when you `Ctrl-C`.
+
+First launch takes ~30–90 s (weight load + CUDA-graph capture). Wait for `Uvicorn running on http://<host>:<port>` in the server output — then you're live.
+
+Stop with `Ctrl-C` (or `kill <pid>`). No supervisord, no state to reconcile, no orphan processes.
+
+### 11.2 Standalone vs full stack — which to use
+
+| Situation | Standalone | Full stack |
+|---|---|---|
+| Building a web app that calls TTS | ✅ point at `:8091` | ✅ point at `:8080` |
+| Need persistent cloned-voice library across restarts | ❌ (upload is in-memory only) | ✅ orchestrator replays on boot |
+| Need all three task types available at once | ❌ run the full stack | ✅ |
+| Need the browser UI | ❌ | ✅ |
+| Need `ref_voice: "saved_name"` shortcuts | ❌ — send `ref_audio` inline | ✅ |
+| Containerising into your own deployment | ✅ smallest footprint | — |
+| Sharing the GPU with another workload | ✅ easier to stop | ✅ admin API is cleaner |
+| CI / batch job worker | ✅ spawn, call, terminate | — |
+
+### 11.3 Endpoints the standalone backend exposes
+
+Each backend is a plain vLLM-Omni process speaking the OpenAI-compatible speech API. All endpoints below are served on whichever port you chose.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/audio/speech` | Synthesise speech — see §11.4 for body schema |
+| `GET` | `/v1/audio/voices` | List built-in speakers + any voices uploaded to this backend process |
+| `POST` | `/v1/audio/voices` | Upload a reference voice (only meaningful on Base; **in-memory only** — lost on restart) |
+| `WS` | `/v1/audio/speech/stream` | WebSocket streaming text-in, per-sentence audio-out |
+
+### 11.4 Request schema
+
+The JSON body for `POST /v1/audio/speech` is identical at `:8080` (orchestrator) and at `:8091 / 8092 / 8093` (standalone backends).
+
+| Field | Type | Per task | Notes |
+|---|---|---|---|
+| `input` | string | **required** all | The text to speak (≤ 8 000 chars) |
+| `task_type` | `"CustomVoice"` / `"VoiceDesign"` / `"Base"` | required | Must match the backend you're hitting |
+| `voice` | string | required for **CustomVoice** | `vivian`, `serena`, `uncle_fu`, `dylan`, `eric`, `ryan`, `aiden`, `ono_anna`, `sohee` |
+| `instructions` | string | required for **VoiceDesign**, optional elsewhere | Free-form style / emotion / description |
+| `ref_audio` | string | required for **Base** | HTTP URL, `file://…` URI, or `data:audio/wav;base64,…` — the reference clip |
+| `ref_text` | string | optional but recommended for **Base** | Exact transcript of `ref_audio` — enables ICL mode (big quality win) |
+| `x_vector_only_mode` | bool | optional **Base** | Skip the transcript path, use only speaker embedding. Faster, slightly lower fidelity |
+| `language` | string | optional all | `Auto` (default), `English`, `Chinese`, `Japanese`, `Korean`, `German`, `French`, `Russian`, `Portuguese`, `Spanish`, `Italian` |
+| `response_format` | string | optional all | `wav` (default), `mp3`, `flac`, `pcm`, `aac`, `opus` |
+| `speed` | float | optional all | 0.25 – 4.0. Ignored when `stream: true` |
+| `stream` | bool | optional all | `true` requires `response_format: "pcm"`. Chunks of raw 16-bit PCM @ 24 kHz mono arrive as each Code2Wav window completes |
+| `max_new_tokens` | int | optional all | Cap on codec tokens. Default 2048 |
+
+Response is binary audio with matching `Content-Type` (e.g. `audio/wav`). Errors are JSON: `{"detail": "<message>"}`.
+
+**Error codes**
+
+| HTTP | Meaning |
+|---|---|
+| `200` | Success; response body is the audio |
+| `400` | Malformed body (missing required field, incompatible combo like `stream=true + response_format=wav`) |
+| `404` | Unknown voice or library name (orchestrator only) |
+| `413` | Voice upload > `MAX_UPLOAD_MB` (default 10 MB) |
+| `500` | Internal error — check backend logs |
+| `503` | Backend not ready / model not loaded |
+
+### 11.5 Python — sync client
+
+```python
+import httpx, pathlib
+
+BASE = "http://127.0.0.1:8091"  # standalone CustomVoice backend
+
+def speak(text, voice="ryan", language="English", instructions=None, out="out.wav"):
+    body = {
+        "task_type": "CustomVoice",
+        "voice": voice,
+        "language": language,
+        "input": text,
+    }
+    if instructions:
+        body["instructions"] = instructions
+    r = httpx.post(f"{BASE}/v1/audio/speech", json=body, timeout=300)
+    r.raise_for_status()
+    pathlib.Path(out).write_bytes(r.content)
+    return out
+
+speak("Hello from a Python script.", out="hello.wav")
+```
+
+### 11.6 Python — async streaming PCM (real-time playback)
+
+```python
+import asyncio, httpx, sounddevice as sd
+
+async def stream_tts(text, voice="vivian", base="http://127.0.0.1:8091"):
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream(
+            "POST", f"{base}/v1/audio/speech",
+            json={
+                "task_type": "CustomVoice", "voice": voice, "input": text,
+                "stream": True, "response_format": "pcm",
+            },
+        ) as r:
+            r.raise_for_status()
+            tail = b""
+            with sd.RawOutputStream(samplerate=24000, channels=1, dtype="int16") as out:
+                async for chunk in r.aiter_bytes():
+                    buf = tail + chunk
+                    even = len(buf) & ~1
+                    out.write(buf[:even])
+                    tail = buf[even:]
+
+asyncio.run(stream_tts("Streaming into my speakers in real time."))
+```
+
+### 11.7 Node.js — fetch
+
+```javascript
+// save as speak.mjs, run: node speak.mjs
+import { writeFile } from "node:fs/promises";
+
+const BASE = "http://127.0.0.1:8092"; // standalone VoiceDesign backend
+
+const r = await fetch(`${BASE}/v1/audio/speech`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    task_type: "VoiceDesign",
+    language: "English",
+    instructions: "a warm elderly narrator, slow and reassuring",
+    input: "Once upon a time, deep in a quiet forest…",
+  }),
+});
+if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+await writeFile("narrator.wav", Buffer.from(await r.arrayBuffer()));
+console.log("wrote narrator.wav");
+```
+
+### 11.8 OpenAI SDK drop-in
+
+The endpoint speaks the OpenAI speech API, so existing OpenAI clients work with zero code changes:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8091/v1", api_key="none")
+
+r = client.audio.speech.create(
+    model="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+    voice="aiden",
+    input="The OpenAI SDK talks to our backend unchanged.",
+)
+r.stream_to_file("sdk_hello.wav")
+```
+
+```javascript
+// Node with openai@4+
+import OpenAI from "openai";
+import { writeFile } from "node:fs/promises";
+
+const client = new OpenAI({ baseURL: "http://127.0.0.1:8091/v1", apiKey: "none" });
+const r = await client.audio.speech.create({
+  model: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  voice: "ryan",
+  input: "Works the same from Node.",
+});
+await writeFile("node_sdk.wav", Buffer.from(await r.arrayBuffer()));
+```
+
+### 11.9 curl — all three tasks
+
+```bash
+# Preset voice → WAV
+curl -sX POST http://127.0.0.1:8091/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"task_type":"CustomVoice","voice":"ryan","language":"English",
+       "input":"Hello from curl."}' \
+  --output hello.wav
+
+# Voice design → WAV
+curl -sX POST http://127.0.0.1:8092/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"task_type":"VoiceDesign","language":"English",
+       "instructions":"a crisp female news-reader, BBC style",
+       "input":"Tonight: an unusual visitor in Hyde Park."}' \
+  --output news.wav
+
+# Voice clone with inline reference
+B64=$(base64 -w0 my_reference.wav)
+curl -sX POST http://127.0.0.1:8093/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d "{\"task_type\":\"Base\",
+       \"input\":\"Cloned voice speaking.\",
+       \"language\":\"English\",
+       \"ref_audio\":\"data:audio/wav;base64,$B64\",
+       \"ref_text\":\"What the reference clip says.\"}" \
+  --output cloned.wav
+
+# Streaming PCM to sox for real-time playback
+curl -sX POST http://127.0.0.1:8091/v1/audio/speech \
+  -H 'Content-Type: application/json' \
+  -d '{"task_type":"CustomVoice","voice":"aiden","language":"English",
+       "input":"Streaming mode.","stream":true,"response_format":"pcm"}' \
+  --no-buffer | play -t raw -r 24000 -e signed -b 16 -c 1 -
+```
+
+### 11.10 Deployment patterns
+
+**Pattern A — Internal service (same host).** Run `scripts/run_customvoice.sh` as a systemd unit, bind to `127.0.0.1:8091`, and call it from your app over loopback. No auth needed (localhost only). Model stays hot between requests.
+
+```ini
+# /etc/systemd/system/qwentts-customvoice.service
+[Unit]
+Description=Qwen3-TTS standalone CustomVoice backend
+After=network.target
+
+[Service]
+WorkingDirectory=/path/to/Qwen-TTS-Studio
+ExecStart=/path/to/Qwen-TTS-Studio/scripts/run_customvoice.sh
+Restart=on-failure
+RestartSec=10
+User=<your-unix-user>
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then: `sudo systemctl enable --now qwentts-customvoice`.
+
+**Pattern B — Reverse-proxy (public endpoint).** Put Nginx / Caddy / Traefik in front, terminate TLS there, add Bearer-token or mTLS auth, and proxy `/tts/` to `http://127.0.0.1:8091/`. Rate-limit at the proxy. The backend itself is unauthenticated.
+
+**Pattern C — Multi-tenant router.** Launch each task type on its own port, and put a tiny router (FastAPI / Express / Fastify) in front that picks the backend by `task_type`. That's exactly what our full-stack orchestrator at `:8080` does; if you want that pattern without the UI / voice-library, our `orchestrator/` directory is the reference implementation (≈ 500 LOC Python).
+
+**Pattern D — Ephemeral job worker.** CI / batch jobs spawn `run_standalone.sh`, call `/v1/audio/speech` a few times, then `SIGTERM` when done. The ~60 s cold-start cost amortises across the batch.
+
+### 11.11 Production tips
+
+- **Keep the backend warm** for interactive UX — cold start is ~30–90 s (weight load + CUDA-graph compile).
+- **One model per process** — vLLM binds one model per instance; that's a framework constraint.
+- **Budget ~6 GB GPU** per backend (≈ 3.5 GB weights + ~1 GB KV cache + ~1 GB vLLM overhead + headroom). On a 128 GB DGX Spark, all three together is trivial.
+- **Prefer `stream=true` + `response_format="pcm"`** for sub-second first-audio. Your UI can start playback while the tail is still decoding.
+- **Uploaded voices at the backend are in-memory only.** If you need persistence across restarts, either use the full-stack orchestrator, or replay uploads from your own store on startup.
+- **CORS** is not set by vLLM-Omni. If you call from a browser at a different origin, reverse-proxy through Nginx / Caddy and add headers there.
+
+---
+
+## 12. Use-case recipes
 
 ### 9.1 Preset voice, English
 
@@ -1141,7 +1430,7 @@ async def llm_to_tts(tokens):
 
 ---
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -1166,7 +1455,7 @@ async def llm_to_tts(tokens):
 
 ---
 
-## 13. Operating guide
+## 14. Operating guide
 
 ### 11.1 Changing ports
 
@@ -1209,9 +1498,9 @@ Or delete `data/voices/` and `data/voices.json` manually (with the server stoppe
 
 ---
 
-## 14. What's under the hood
+## 15. What's under the hood
 
-### 14.1 The Qwen3-TTS architecture (abbreviated)
+### 15.1 The Qwen3-TTS architecture (abbreviated)
 
 ```
 text  ─►  Qwen2 BPE  ─►  Talker (28-layer Transformer + MRoPE + SWA)  ─►  codebook-0 stream
@@ -1232,7 +1521,7 @@ text  ─►  Qwen2 BPE  ─►  Talker (28-layer Transformer + MRoPE + SWA)  �
 
 That lightweight, fully-causal decoder is why 12Hz Qwen3-TTS achieves sub-100 ms first-packet latency on Hopper reference hardware.
 
-### 14.2 The vLLM-Omni pipeline
+### 15.2 The vLLM-Omni pipeline
 
 Each of our three backends runs a two-stage pipeline:
 
@@ -1241,13 +1530,13 @@ Each of our three backends runs a two-stage pipeline:
 
 `async_chunk: true` makes Stage 1 emit PCM frames as Stage 0 produces codes — this is what enables true real-time streaming in the `stream=true` path.
 
-### 14.3 Why three servers, not one
+### 15.3 Why three servers, not one
 
 vLLM binds **one model per server instance**. Since we want all three task types always-on for zero-switch latency, we run three servers on three internal ports (8091/8092/8093). The orchestrator is the only public-facing port. This is consistent with how vLLM-Omni itself recommends deploying TTS in production (see the vllm-omni examples under `examples/online_serving/qwen3_tts/`).
 
 ---
 
-## 15. Environment variables reference (`.env`)
+## 16. Environment variables reference (`.env`)
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -1269,7 +1558,7 @@ vLLM binds **one model per server instance**. Since we want all three task types
 
 ---
 
-## 16. Known limitations (v0.1.0)
+## 17. Known limitations (v0.1.0)
 
 - **Single-request serving.** Batch processing is not yet optimised for online serving in vLLM-Omni; a burst of concurrent requests may queue. Serial latency is the metric that's tuned.
 - **Localhost binding only.** If you want to expose this on a LAN, change `ORCH_HOST=0.0.0.0` in `.env` and add a reverse proxy with auth in front of it. There is no auth in-proc.
@@ -1279,7 +1568,7 @@ vLLM binds **one model per server instance**. Since we want all three task types
 
 ---
 
-## 17. Credits & references
+## 18. Credits & references
 
 - **Qwen3-TTS paper** — Alibaba Qwen team, "Qwen3-TTS Technical Report" (arXiv 2601.15621).
 - **Qwen3-TTS weights & docs** — `github.com/QwenLM/Qwen3-TTS`, `huggingface.co/collections/Qwen/qwen3-tts`.
