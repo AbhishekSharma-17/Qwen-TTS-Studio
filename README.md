@@ -47,6 +47,46 @@ bash scripts/stop.sh        # graceful shutdown
 Open http://127.0.0.1:8080/ in a browser. If running headless, use SSH port
 forwarding: `ssh -L 8080:127.0.0.1:8080 <dgx-spark-host>`.
 
+## Run a single model (standalone / embedding mode)
+
+When you want to embed Qwen3-TTS in another app and **don't need the UI,
+voice-library persistence, or all three task types at once**, launch just
+one backend directly. No orchestrator, no supervisord — a single
+`vllm-omni` process exposing the OpenAI-compatible speech API on its own
+port. Ctrl-C for a clean shutdown.
+
+```bash
+bash scripts/run_customvoice.sh                       # preset speakers      :8091
+bash scripts/run_voicedesign.sh                       # voice design         :8092
+bash scripts/run_base.sh                              # voice clone          :8093
+
+# Or the generic form — pick task, port, bind address:
+bash scripts/run_standalone.sh CustomVoice            # default :8091 on 0.0.0.0
+bash scripts/run_standalone.sh VoiceDesign 8100       # on :8100
+bash scripts/run_standalone.sh Base 8200 127.0.0.1    # localhost-only bind
+bash scripts/run_standalone.sh --help                 # full usage
+```
+
+Each script:
+
+- Verifies the venv + model weights exist, and that the chosen port is free
+- Prints a banner with the exact endpoint URL and a ready-to-paste curl example
+- First launch takes ~30–90 s (weight load + CUDA-graph capture) — wait for `Uvicorn running on http://…`
+- Traps SIGINT/SIGTERM for clean shutdown
+
+**When to choose standalone vs full stack:**
+
+| Situation | Standalone | Full stack |
+|---|---|---|
+| Single task type, embed in your app | ✅ | ✅ |
+| All three tasks needed at once | ❌ | ✅ |
+| Browser UI / voice library | ❌ | ✅ |
+| Smallest footprint, simplest deploy | ✅ | — |
+
+See [`docs/GUIDE.md` §11](docs/GUIDE.md#11-standalone-single-model-mode--integration-guide)
+for full integration examples (Python, Node.js, OpenAI SDK, systemd unit,
+reverse-proxy patterns).
+
 ## Services
 
 | Service | Port | What it does |
