@@ -1,0 +1,48 @@
+# Secrets / per-machine config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python venv
+.venv/
+venv/
+env/
+
+# Bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Model weights — NEVER commit
+models/
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+
+# Upstream vllm-omni (re-cloned + patched by scripts/00_install.sh)
+vllm-omni/
+
+# Runtime output
+logs/
+data/voices/*
+!data/voices/.gitkeep
+data/generated/*
+!data/generated/.gitkeep
+data/voices.json
+!data/voices.example.json
+
+# Rendered supervisord config (ship the .tpl, not the rendering)
+configs/supervisord.conf
+
+# OS / IDE junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude harness
+.claude/

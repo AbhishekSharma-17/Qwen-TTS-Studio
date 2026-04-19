@@ -1,0 +1,57 @@
+# Qwen3-TTS stage config tuned for DGX Spark GB10 with 3 models co-resident.
+#
+# Deltas vs upstream vllm_omni/deploy/qwen3_tts.yaml:
+#   - gpu_memory_utilization: 0.15 per stage (3 models * 2 stages * 0.15 = 0.9)
+#   - max_num_seqs: 4 on talker (single-user workstation, not a fleet)
+#   - async_chunk: true (streaming default)
+#   - Stage 0 keeps cudagraph; Stage 1 keeps enforce_eager (codec loop)
+#   - Matches decoder sliding window: 25-frame chunks, 72-frame left context.
+
+async_chunk: true
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      shm_threshold_bytes: 65536
+      codec_streaming: true
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 3000
+      connector_get_max_wait: 300
+      codec_chunk_frames: 25
+      codec_left_context_frames: 72
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 4
+    gpu_memory_utilization: 0.15
+    async_scheduling: true
+    max_num_batched_tokens: 512
+    max_model_len: 4096
+    devices: "0"
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.9
+      top_k: 50
+      max_tokens: 4096
+      seed: 42
+      repetition_penalty: 1.05
+
+  - stage_id: 1
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.15
+    enforce_eager: true
+    async_scheduling: true
+    max_num_batched_tokens: 65536
+    max_model_len: 65536
+    devices: "0"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      seed: 42
+      repetition_penalty: 1.0

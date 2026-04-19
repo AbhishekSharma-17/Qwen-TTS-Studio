@@ -1,0 +1,25 @@
+[project]
+name = "qwentts-studio"
+version = "0.1.0"
+description = "Production TTS stack on DGX Spark: FastAPI orchestrator in front of 3 vLLM-Omni Qwen3-TTS backends, with a plain HTML/CSS/JS UI."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "httpx>=0.28",
+    "websockets>=13",
+    "python-multipart>=0.0.17",
+    "aiofiles>=24",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.6",
+    "soundfile>=0.12",
+    "numpy>=1.26",
+    "pydub>=0.25",
+    "supervisor>=4.2",
+    # Runtime deps pulled in by vllm-omni's Qwen3-TTS paths:
+    "librosa>=0.10",      # reference-audio resampling in voice cloning
+    "onnxruntime>=1.19",  # vllm-omni speech tokenizer helper
+]
+
+[tool.uv]
+package = false
