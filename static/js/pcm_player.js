@@ -13,10 +13,12 @@ export class PcmStreamPlayer {
     this.totalBytes = 0;
     this.stopped = false;
     this.finished = false;
-    this.onBytes = null;       // (totalBytes, durationSec) => void
-    this.onFirstAudio = null;  // () => void  (fires when the first chunk is actually scheduled)
-    this.onDone = null;        // () => void  (fires after the upstream stream ends naturally)
+    this.onBytes = null;         // (totalBytes, durationSec) => void
+    this.onFirstAudio = null;    // () => void  (fires when the first chunk is actually scheduled)
+    this.onDone = null;          // () => void  (fires after the upstream stream ends naturally)
+    this.onPlaybackEnd = null;   // () => void  (fires when the WebAudio buffer queue has drained)
     this._firstScheduled = false;
+    this._playbackEndTimer = null;
   }
 
   _ensureCtx() {
@@ -76,12 +78,23 @@ export class PcmStreamPlayer {
     }
     this.finished = !this.stopped;
     if (this.finished && this.onDone) this.onDone();
+
+    // Fire onPlaybackEnd when the scheduled buffer queue actually drains.
+    // (onDone fires when fetch completes; audio may still be playing after.)
+    if (!this.stopped && this.ctx && this.onPlaybackEnd) {
+      const remainingMs = Math.max(0, (this.nextStart - this.ctx.currentTime) * 1000);
+      clearTimeout(this._playbackEndTimer);
+      this._playbackEndTimer = setTimeout(() => {
+        if (!this.stopped && this.onPlaybackEnd) this.onPlaybackEnd();
+      }, remainingMs + 30);
+    }
   }
 
   /** Stop playback immediately; idempotent. Upstream reader is still aborted via the caller's AbortController. */
   stop() {
     if (this.stopped) return;
     this.stopped = true;
+    clearTimeout(this._playbackEndTimer);
     for (const s of this.sources) {
       try { s.stop(0); } catch {}
       try { s.disconnect(); } catch {}

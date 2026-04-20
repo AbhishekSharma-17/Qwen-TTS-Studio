@@ -132,6 +132,10 @@ function buildCard(task, title) {
     <div class="oc-header">
       <div class="oc-title">
         <span class="spinner" aria-hidden="true"></span>
+        <span class="playing-indicator" aria-hidden="true">
+          <span class="eq-bars"><span></span><span></span><span></span><span></span><span></span></span>
+          <span>Playing</span>
+        </span>
         <span class="title">${title}</span>
         <span class="state">· Generating…</span>
       </div>
@@ -179,7 +183,7 @@ function markCardDone(ui, t0) {
 }
 
 function markCardError(ui, msg) {
-  ui.card.classList.remove("streaming");
+  ui.card.classList.remove("streaming", "playing");
   ui.card.classList.add("error");
   ui.stateLbl.textContent = `· ${msg}`;
   ui.spinner.remove();
@@ -188,12 +192,25 @@ function markCardError(ui, msg) {
 }
 
 function markCardStopped(ui, t0) {
-  ui.card.classList.remove("streaming");
+  ui.card.classList.remove("streaming", "playing");
   ui.card.classList.add("done");
   ui.stateLbl.textContent = "· Stopped";
   ui.spinner.remove();
   ui.stopBtn.remove();
   ui.footer.textContent = `Stopped after ${fmtTime(performance.now() - t0)}`;
+}
+
+/** Wire a card's <audio> element so playback toggles the .playing state
+    (pulsing border + EQ bars). Safe to call multiple times. */
+function wireAudioPlayingState(ui) {
+  if (ui.audio.dataset.playingWired === "1") return;
+  ui.audio.dataset.playingWired = "1";
+  const on = () => ui.card.classList.add("playing");
+  const off = () => ui.card.classList.remove("playing");
+  ui.audio.addEventListener("play", on);
+  ui.audio.addEventListener("playing", on);
+  ui.audio.addEventListener("pause", off);
+  ui.audio.addEventListener("ended", off);
 }
 
 // =========================================================================
@@ -230,6 +247,7 @@ async function generate(task, body, { stream }) {
     stoppedByUser = true;
     controller.abort();
     if (player) player.stop();
+    ui.card.classList.remove("playing");
   });
 
   // Release the generation lock + rearm the button
@@ -283,6 +301,8 @@ async function generate(task, body, { stream }) {
       player.onFirstAudio = () => {
         ui.ttfa.textContent = `TTFA ${fmtTime(performance.now() - t0)}`;
         wireDownload();
+        ui.card.classList.add("playing");
+        ui.stateLbl.textContent = "· Playing";
       };
       player.onBytes = (n, sec) => {
         ui.bytes.textContent = fmtBytes(n);
@@ -294,6 +314,10 @@ async function generate(task, body, { stream }) {
         ui.progressBar.style.width = pct + "%";
       };
       player.onDone = () => { ui.progressBar.style.width = "100%"; };
+      player.onPlaybackEnd = () => {
+        // Audio has drained the speakers — remove the pulsing/EQ effect.
+        ui.card.classList.remove("playing");
+      };
 
       await player.playStream(r);
 
@@ -304,6 +328,7 @@ async function generate(task, body, { stream }) {
         // Expose re-listen <audio> with the final blob
         const blob = player.toWavBlob();
         ui.audio.src = URL.createObjectURL(blob);
+        wireAudioPlayingState(ui);
         markCardDone(ui, t0);
       }
     } else {
@@ -312,6 +337,8 @@ async function generate(task, body, { stream }) {
       const url = URL.createObjectURL(blob);
       ui.audio.src = url;
       ui.relisten.open = true; // expand by default in non-streaming mode
+      wireAudioPlayingState(ui);
+      ui.audio.play().catch(() => {}); // auto-play; browsers usually allow after user click
       ui.ttfa.textContent = `Gen ${fmtTime(performance.now() - t0)}`;
       ui.bytes.textContent = fmtBytes(blob.size);
       ui.progressBar.style.width = "100%";
