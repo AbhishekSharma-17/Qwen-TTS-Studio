@@ -19,6 +19,7 @@ dependencies = [
     # Runtime deps pulled in by vllm-omni's Qwen3-TTS paths:
     "librosa>=0.10",      # reference-audio resampling in voice cloning
     "onnxruntime>=1.19",  # vllm-omni speech tokenizer helper
+    "resampy>=0.4",       # vllm[audio] leaf dep — Base backend crashes on clone without it
 ]
 
 [tool.uv]

@@ -65,6 +65,12 @@ else
   log "vLLM ${VLLM_VER} already installed"
 fi
 
+# vLLM's [audio] extras — needed by the Base/voice-clone backend to decode
+# reference audio uploads. Missing 'resampy' causes the Base worker to crash
+# with "Please install vllm[audio] for audio support" on first clone request.
+log "Ensuring vLLM audio extras are installed"
+uv pip install 'vllm[audio]' 2>&1 | tee -a "$LOG"
+
 # ---------------------------------------------------------------------------
 # 4. vllm-omni (clone + patch + editable install)
 # ---------------------------------------------------------------------------
