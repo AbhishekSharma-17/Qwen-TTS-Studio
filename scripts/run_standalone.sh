@@ -50,9 +50,12 @@ EOF
 case "$TASK" in
   ""|-h|--help)
     usage; exit 0 ;;
-  CustomVoice) MODEL_SUBDIR="Qwen3-TTS-12Hz-1.7B-CustomVoice"; DEFAULT_PORT=8091 ;;
-  VoiceDesign) MODEL_SUBDIR="Qwen3-TTS-12Hz-1.7B-VoiceDesign"; DEFAULT_PORT=8092 ;;
-  Base)        MODEL_SUBDIR="Qwen3-TTS-12Hz-1.7B-Base";        DEFAULT_PORT=8093 ;;
+  CustomVoice) MODEL_SUBDIR="Qwen3-TTS-12Hz-1.7B-CustomVoice"; DEFAULT_PORT=8091
+               SERVED_NAME="Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" ;;
+  VoiceDesign) MODEL_SUBDIR="Qwen3-TTS-12Hz-1.7B-VoiceDesign"; DEFAULT_PORT=8092
+               SERVED_NAME="Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign" ;;
+  Base)        MODEL_SUBDIR="Qwen3-TTS-12Hz-1.7B-Base";        DEFAULT_PORT=8093
+               SERVED_NAME="Qwen/Qwen3-TTS-12Hz-1.7B-Base" ;;
   *)
     echo "ERROR: unknown task '$TASK'" >&2
     echo >&2
@@ -148,9 +151,14 @@ cat <<BANNER
 BANNER
 
 # ---- exec the server (replaces this shell) ----
+# --served-model-name registers the model under its HF-style ID so
+# OpenAI-compatible clients (openai SDK, livekit-plugins-openai, etc.)
+# can address it as e.g. "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" instead
+# of the raw filesystem path.
 exec vllm-omni serve "$MODEL_DIR" \
   --omni \
   --host "$HOST" \
   --port "$PORT" \
   --trust-remote-code \
+  --served-model-name "$SERVED_NAME" \
   --deploy-config "$DEPLOY_CFG"
